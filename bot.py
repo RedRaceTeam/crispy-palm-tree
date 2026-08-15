@@ -36,32 +36,58 @@ RARITIES = {
     "ULTIMATE": {"emoji": "👑", "rating": 150, "chance": 1},
 }
 
-# ===== БАЗА =====
+# ===== БАЗА ДАННЫХ =====
 def init_db():
     conn = sqlite3.connect("indycard.db")
     c = conn.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY, username TEXT, display_name TEXT,
-        balance INTEGER DEFAULT 500, rating INTEGER DEFAULT 0,
-        pvp_wins INTEGER DEFAULT 0, pvp_losses INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, language TEXT DEFAULT 'ru'
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        display_name TEXT,
+        balance INTEGER DEFAULT 500,
+        rating INTEGER DEFAULT 0,
+        pvp_wins INTEGER DEFAULT 0,
+        pvp_losses INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        language TEXT DEFAULT 'ru'
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS user_cards (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, code TEXT, quantity INTEGER DEFAULT 1,
-        acquired_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id, code)
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        code TEXT,
+        quantity INTEGER DEFAULT 1,
+        acquired_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, code)
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS cards (
-        code TEXT PRIMARY KEY, name TEXT, team TEXT, number INTEGER,
-        rarity TEXT, price INTEGER, rating_points INTEGER DEFAULT 10, year INTEGER, image TEXT
+        code TEXT PRIMARY KEY,
+        name TEXT,
+        team TEXT,
+        number INTEGER,
+        rarity TEXT,
+        price INTEGER,
+        rating_points INTEGER DEFAULT 10,
+        year INTEGER,
+        image TEXT
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS transactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, type TEXT, code TEXT,
-        amount INTEGER, balance_after INTEGER, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        type TEXT,
+        code TEXT,
+        amount INTEGER,
+        balance_after INTEGER,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS auctions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, card_code TEXT, seller_id INTEGER,
-        start_price INTEGER, current_bid INTEGER, bidder_id INTEGER,
-        end_time TIMESTAMP, status TEXT DEFAULT 'active'
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        card_code TEXT,
+        seller_id INTEGER,
+        start_price INTEGER,
+        current_bid INTEGER,
+        bidder_id INTEGER,
+        end_time TIMESTAMP,
+        status TEXT DEFAULT 'active'
     )""")
     conn.commit()
     conn.close()
@@ -71,16 +97,16 @@ def seed_data():
     conn = sqlite3.connect("indycard.db")
     c = conn.cursor()
     for code, data in DRIVERS.items():
-        c.execute("""INSERT OR IGNORE INTO cards (code, name, team, number, rarity, price, rating_points, year)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        c.execute("""INSERT OR IGNORE INTO cards (code, name, team, number, rarity, price, rating_points, year, image)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (code, data["name"], data["team"], data["number"], data["rarity"], data["price"],
-             RARITIES.get(data["rarity"], {}).get("rating", 10), data.get("year", 2026)))
+             RARITIES.get(data["rarity"], {}).get("rating", 10), data.get("year", 2026), data.get("image", "")))
     for name, data in WINNERS.items():
         code = f"WIN_{name[:3].upper()}_{data['year']}"
-        c.execute("""INSERT OR IGNORE INTO cards (code, name, team, number, rarity, price, rating_points, year)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        c.execute("""INSERT OR IGNORE INTO cards (code, name, team, number, rarity, price, rating_points, year, image)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (code, name, "Indy 500 Winner", 0, data["rarity"], data["price"],
-             RARITIES.get(data["rarity"], {}).get("rating", 10), data["year"]))
+             RARITIES.get(data["rarity"], {}).get("rating", 10), data["year"], ""))
     conn.commit()
     conn.close()
 
@@ -88,7 +114,7 @@ def seed_data():
 init_db()
 seed_data()
 
-# ===== ФУНКЦИИ =====
+# ===== ФУНКЦИИ БД =====
 def get_user(user_id):
     conn = sqlite3.connect("indycard.db")
     c = conn.cursor()
@@ -166,6 +192,14 @@ def remove_card_from_user(user_id, code, quantity=1):
     conn.close()
 
 
+def update_card_price(code, new_price):
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("UPDATE cards SET price = ? WHERE code = ?", (new_price, code))
+    conn.commit()
+    conn.close()
+
+
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
@@ -217,7 +251,7 @@ def admin_panel():
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton(text="➕ Добавить карту", callback_data="admin_add"),
-        InlineKeyboardButton(text="📝 Редактировать", callback_data="admin_edit"),
+        InlineKeyboardButton(text="📝 Редактировать карту", callback_data="admin_edit"),
         InlineKeyboardButton(text="🗑️ Удалить карту", callback_data="admin_delete"),
         InlineKeyboardButton(text="📋 Список карт", callback_data="admin_list"),
         InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
@@ -230,7 +264,10 @@ def admin_panel():
 async def start_command(message: types.Message):
     user = create_user(message.from_user.id, message.from_user.username)
     await message.answer(
-        f"🏁 **IndyCard Exchange**\n\nДобро пожаловать, {user['display_name']}!\n💰 Баланс: {user['balance']} 💰\n\nИспользуй кнопки:",
+        f"🏁 **IndyCard Exchange**\n\n"
+        f"Добро пожаловать, {user['display_name']}!\n"
+        f"💰 Баланс: {user['balance']} 💰\n\n"
+        f"Используй кнопки для навигации:",
         reply_markup=main_menu(),
         parse_mode="Markdown",
     )
@@ -275,7 +312,8 @@ async def callback_handler(call: types.CallbackQuery):
         total = 0
         for code, qty in cards.items():
             card = get_card_info(code)
-            if not card: continue
+            if not card:
+                continue
             emoji = get_rarity_emoji(card["rarity"])
             text += f"{emoji} {card['name']} ({code}) ×{qty}\n"
             total += qty
@@ -303,7 +341,11 @@ async def callback_handler(call: types.CallbackQuery):
         card = get_card_info(code)
         emoji = get_rarity_emoji(card["rarity"])
         await call.message.edit_text(
-            f"🎲 **Получена карта!**\n\n{emoji} {card['name']} ({code})\n🏁 {card['team']}\n🎴 {card['rarity']}\n💰 {card['price']} 💰",
+            f"🎲 **Получена карта!**\n\n"
+            f"{emoji} {card['name']} ({code})\n"
+            f"🏁 {card['team']}\n"
+            f"🎴 {card['rarity']}\n"
+            f"💰 {card['price']} 💰",
             reply_markup=back_to_menu(),
             parse_mode="Markdown",
         )
@@ -315,7 +357,7 @@ async def callback_handler(call: types.CallbackQuery):
         cards = get_user_cards(user_id)
         conn = sqlite3.connect("indycard.db")
         c = conn.cursor()
-        c.execute("SELECT code, name, rarity, price FROM cards ORDER BY price DESC LIMIT 10")
+        c.execute("SELECT code, name, rarity, price FROM cards ORDER BY price DESC LIMIT 15")
         rows = c.fetchall()
         conn.close()
         text = "🏦 **Биржа**\n\n"
@@ -323,7 +365,9 @@ async def callback_handler(call: types.CallbackQuery):
             emoji = get_rarity_emoji(rarity)
             qty = cards.get(code, 0)
             text += f"{emoji} {name} ({code}) — {price} 💰{' (📦x'+str(qty)+')' if qty > 0 else ''}\n"
-        text += f"\n💰 Баланс: {user['balance']} 💰\n\nКупить: /buy [код]\nПродать: /sell [код]"
+        text += f"\n💰 Баланс: {user['balance']} 💰\n\n"
+        text += "Купить: /buy [код]\n"
+        text += "Продать: /sell [код]"
         await call.message.edit_text(text, reply_markup=back_to_menu(), parse_mode="Markdown")
         await call.answer()
         return
@@ -333,7 +377,13 @@ async def callback_handler(call: types.CallbackQuery):
         cards = get_user_cards(user_id)
         total = sum(cards.values())
         await call.message.edit_text(
-            f"👤 **Профиль**\n\nИмя: {user['display_name']}\n💰 Баланс: {user['balance']} 💰\n🎴 Карт: {total}\n🏆 Рейтинг: {user['rating']}\n🏁 PvP: {user['pvp_wins']}W / {user['pvp_losses']}L\n\n/setname — сменить ник",
+            f"👤 **Профиль**\n\n"
+            f"Имя: {user['display_name']}\n"
+            f"💰 Баланс: {user['balance']} 💰\n"
+            f"🎴 Карт: {total}\n"
+            f"🏆 Рейтинг: {user['rating']}\n"
+            f"🏁 PvP: {user['pvp_wins']}W / {user['pvp_losses']}L\n\n"
+            f"/setname — сменить ник",
             reply_markup=back_to_menu(),
             parse_mode="Markdown",
         )
@@ -347,7 +397,11 @@ async def callback_handler(call: types.CallbackQuery):
 
     if call.data == "about":
         await call.message.edit_text(
-            "ℹ️ **О проекте**\n\nIndyCard Exchange — карточная игра по IndyCar.\n\nРазработчики:\n@Scanialove\n@Gabriella1488",
+            "ℹ️ **О проекте**\n\n"
+            "IndyCard Exchange — карточная игра по IndyCar.\n\n"
+            "Разработчики:\n"
+            "@Scanialove\n"
+            "@Gabriella1488",
             reply_markup=back_to_menu(),
             parse_mode="Markdown",
         )
@@ -358,26 +412,47 @@ async def callback_handler(call: types.CallbackQuery):
         if not is_admin(user_id):
             await call.answer("⛔ Нет доступа", show_alert=True)
             return
+
         if call.data == "admin_add":
             await call.message.edit_text(
-                "➕ Введите: `code|name|team|number|rarity|price|year`\nПример: PAL|Alex Palou|Chip Ganassi|10|LEGENDARY|1200|2026",
+                "➕ **Добавление карты**\n\n"
+                "Введите данные в формате:\n"
+                "`code|name|team|number|rarity|price|year|image`\n\n"
+                "Пример:\n"
+                "`PAL|Alex Palou|Chip Ganassi|10|LEGENDARY|1200|2026|https://...`\n\n"
+                "Фото можно указать позже через редактирование.",
                 reply_markup=back_to_menu(),
                 parse_mode="Markdown",
             )
+            bot.register_next_step_handler(call.message, admin_add_card_step)
             await call.answer()
             return
+
+        if call.data == "admin_edit":
+            await call.message.edit_text(
+                "📝 **Редактирование карты**\n\n"
+                "Введите код карты (например, PAL):",
+                reply_markup=back_to_menu(),
+                parse_mode="Markdown",
+            )
+            bot.register_next_step_handler(call.message, admin_edit_select)
+            await call.answer()
+            return
+
         if call.data == "admin_list":
             conn = sqlite3.connect("indycard.db")
             c = conn.cursor()
-            c.execute("SELECT code, name, rarity, price FROM cards")
+            c.execute("SELECT code, name, rarity, price FROM cards ORDER BY price DESC")
             rows = c.fetchall()
             conn.close()
             text = "📋 **Все карты**\n\n"
             for code, name, rarity, price in rows:
-                text += f"{get_rarity_emoji(rarity)} {name} ({code}) — {rarity} — {price} 💰\n"
+                emoji = get_rarity_emoji(rarity)
+                text += f"{emoji} {name} ({code}) — {rarity} — {price} 💰\n"
             await call.message.edit_text(text[:4000], reply_markup=back_to_menu(), parse_mode="Markdown")
             await call.answer()
             return
+
         if call.data == "admin_stats":
             conn = sqlite3.connect("indycard.db")
             c = conn.cursor()
@@ -389,10 +464,23 @@ async def callback_handler(call: types.CallbackQuery):
             total = c.fetchone()[0] or 0
             conn.close()
             await call.message.edit_text(
-                f"📊 **Статистика**\n\n👥 Пользователей: {users}\n🎴 Всего карт: {cards}\n📦 Карт у игроков: {total}",
+                f"📊 **Статистика**\n\n"
+                f"👥 Пользователей: {users}\n"
+                f"🎴 Всего карт: {cards}\n"
+                f"📦 Карт у игроков: {total}",
                 reply_markup=back_to_menu(),
                 parse_mode="Markdown",
             )
+            await call.answer()
+            return
+
+        if call.data == "admin_delete":
+            await call.message.edit_text(
+                "🗑️ **Удаление карты**\n\nВведите код карты:",
+                reply_markup=back_to_menu(),
+                parse_mode="Markdown",
+            )
+            bot.register_next_step_handler(call.message, admin_delete_card)
             await call.answer()
             return
 
@@ -404,6 +492,82 @@ async def callback_handler(call: types.CallbackQuery):
     await call.answer()
 
 
+# ===== АДМИН-ФУНКЦИИ =====
+async def admin_add_card_step(message: types.Message):
+    try:
+        parts = message.text.split('|')
+        if len(parts) < 7:
+            await message.answer("❌ Нужно минимум 7 полей: code|name|team|number|rarity|price|year")
+            return
+        code, name, team, number, rarity, price, year = parts[:7]
+        image = parts[7] if len(parts) > 7 else ""
+
+        conn = sqlite3.connect("indycard.db")
+        c = conn.cursor()
+        c.execute("""INSERT INTO cards (code, name, team, number, rarity, price, rating_points, year, image)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (code.upper(), name, team, int(number), rarity, int(price),
+             RARITIES.get(rarity, {}).get("rating", 10), int(year), image))
+        conn.commit()
+        conn.close()
+        await message.answer(f"✅ Карта {name} ({code}) добавлена!")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+async def admin_edit_select(message: types.Message):
+    code = message.text.upper()
+    card = get_card_info(code)
+    if not card:
+        await message.answer("❌ Карта не найдена")
+        return
+    await message.answer(
+        f"✏️ **Редактируем {card['name']} ({code})**\n\n"
+        f"Текущие данные:\n"
+        f"`{card['name']}|{card['team']}|{card['number']}|{card['rarity']}|{card['price']}|{card['year']}|{card['image'] or 'Нет фото'}`\n\n"
+        f"Введите новые данные в том же формате:\n"
+        f"`name|team|number|rarity|price|year|image`",
+        parse_mode="Markdown"
+    )
+    bot.register_next_step_handler(message, admin_edit_save, code)
+
+
+async def admin_edit_save(message: types.Message, code: str):
+    try:
+        parts = message.text.split('|')
+        if len(parts) < 6:
+            await message.answer("❌ Нужно минимум 6 полей: name|team|number|rarity|price|year")
+            return
+        name, team, number, rarity, price, year = parts[:6]
+        image = parts[6] if len(parts) > 6 else ""
+
+        conn = sqlite3.connect("indycard.db")
+        c = conn.cursor()
+        c.execute("""UPDATE cards SET name=?, team=?, number=?, rarity=?, price=?, year=?, image=?
+            WHERE code=?""", (name, team, int(number), rarity, int(price), int(year), image, code))
+        conn.commit()
+        conn.close()
+        await message.answer(f"✅ Карта {name} ({code}) обновлена!")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+async def admin_delete_card(message: types.Message):
+    code = message.text.upper()
+    card = get_card_info(code)
+    if not card:
+        await message.answer("❌ Карта не найдена")
+        return
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM cards WHERE code = ?", (code,))
+    c.execute("DELETE FROM user_cards WHERE code = ?", (code,))
+    conn.commit()
+    conn.close()
+    await message.answer(f"🗑️ Карта {card['name']} ({code}) удалена!")
+
+
+# ===== МИНИ-ИГРЫ =====
 async def handle_game(call: types.CallbackQuery):
     user_id = call.from_user.id
 
@@ -437,9 +601,14 @@ async def handle_game(call: types.CallbackQuery):
         return
 
     if call.data == "game_guess_track":
-        tracks = [{"name": "Indianapolis", "type": "овал"}, {"name": "Long Beach", "type": "уличная"},
-                  {"name": "Road America", "type": "шоссе"}, {"name": "Mid-Ohio", "type": "шоссе"},
-                  {"name": "Nashville", "type": "уличная"}, {"name": "Gateway", "type": "овал"}]
+        tracks = [
+            {"name": "Indianapolis", "type": "овал"},
+            {"name": "Long Beach", "type": "уличная"},
+            {"name": "Road America", "type": "шоссе"},
+            {"name": "Mid-Ohio", "type": "шоссе"},
+            {"name": "Nashville", "type": "уличная"},
+            {"name": "Gateway", "type": "овал"}
+        ]
         track = random.choice(tracks)
         options = [t["name"] for t in tracks]
         random.shuffle(options)
@@ -485,7 +654,10 @@ async def handle_game(call: types.CallbackQuery):
         update_balance(user_id, win, "game_dice")
         user = get_user(user_id)
         await call.message.edit_text(
-            f"🎲 **Результат**\n\n{d1} + {d2} = {total}\n{'🎉 Выигрыш: ' + str(win) if win > 0 else '❌ Проигрыш: ' + str(-win)}\n\n💰 Баланс: {user['balance']} 💰",
+            f"🎲 **Результат**\n\n"
+            f"{d1} + {d2} = {total}\n"
+            f"{'🎉 Выигрыш: ' + str(win) if win > 0 else '❌ Проигрыш: ' + str(-win)}\n\n"
+            f"💰 Баланс: {user['balance']} 💰",
             reply_markup=back_to_menu(),
             parse_mode="Markdown",
         )
@@ -571,7 +743,7 @@ async def top_command(message: types.Message):
     await message.answer(text, parse_mode="Markdown")
 
 
-# ===== РЕГИСТРАЦИЯ =====
+# ===== РЕГИСТРАЦИЯ ХЕНДЛЕРОВ =====
 def register_handlers(dp: Dispatcher):
     dp.message.register(start_command, Command("start"))
     dp.message.register(admin_command, Command("admin"))
