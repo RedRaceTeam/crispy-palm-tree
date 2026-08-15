@@ -756,14 +756,14 @@ def register_handlers(dp: Dispatcher):
 
 
 # ===== ВЕБХУК =====
-@asynccontextmanager
-async def lifespan(app: web.Application):
-    logger.info("Starting...")
+async def on_startup(app: web.Application):
     bot = app["bot"]
     await bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}")
-    logger.info(f"Webhook set to {WEBHOOK_URL}{WEBHOOK_PATH}")
-    yield
-    logger.info("Shutdown...")
+    logger.info(f"✅ Webhook set to {WEBHOOK_URL}{WEBHOOK_PATH}")
+
+
+async def on_shutdown(app: web.Application):
+    logger.info("Shutting down...")
 
 
 def main():
@@ -773,9 +773,14 @@ def main():
 
     app = web.Application()
     app["bot"] = bot
+
+    # Регистрируем обработчики вебхука
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
-    app.cleanup_ctx.append(lifespan)
+
+    # Добавляем startup/shutdown хуки
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
 
     web.run_app(app, host="0.0.0.0", port=PORT)
 
