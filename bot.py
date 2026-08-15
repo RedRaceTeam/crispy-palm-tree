@@ -92,6 +92,14 @@ def init_db():
         used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(code, user_id)
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS market_listings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        card_code TEXT,
+        price INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        status TEXT DEFAULT 'active'
+    )""")
     conn.commit()
     conn.close()
 
@@ -257,6 +265,29 @@ def use_promo(code, user_id):
     conn.close()
     return result
 
+def add_market_listing(user_id, card_code, price):
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO market_listings (user_id, card_code, price) VALUES (?, ?, ?)",
+              (user_id, card_code, price))
+    conn.commit()
+    conn.close()
+
+def get_market_listings():
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("SELECT id, user_id, card_code, price FROM market_listings WHERE status = 'active'")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def remove_market_listing(listing_id):
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("UPDATE market_listings SET status = 'sold' WHERE id = ?", (listing_id,))
+    conn.commit()
+    conn.close()
+
 def update_card_price(code, change):
     conn = sqlite3.connect("indycard.db")
     c = conn.cursor()
@@ -271,16 +302,21 @@ def update_card_price(code, change):
     conn.commit()
     conn.close()
 
+# ===== СЕССИИ =====
+user_market_session = {}  # {user_id: {"cards": [], "index": 0, "price": 0}}
+admin_price_session = {}  # {user_id: code}
+user_sell_session = {}    # {user_id: {"cards": [], "index": 0}}
+
 # ===== КЛАВИАТУРЫ =====
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎴 Мои карты", callback_data="my_cards"),
          InlineKeyboardButton(text="🎲 Получить карту", callback_data="get_card")],
         [InlineKeyboardButton(text="🏦 Биржа", callback_data="exchange"),
-         InlineKeyboardButton(text="🎮 Мини-игры", callback_data="games")],
+         InlineKeyboardButton(text="📊 Рынок игроков", callback_data="player_market")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
          InlineKeyboardButton(text="🏪 Магазин", callback_data="shop")],
-        [InlineKeyboardButton(text="🎁 Активировать промокод", callback_data="promo_enter"),
+        [InlineKeyboardButton(text="🎁 Промокод", callback_data="promo_enter"),
          InlineKeyboardButton(text="ℹ️ О проекте", callback_data="about")]
     ])
 
@@ -303,6 +339,15 @@ def shop_menu():
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
     ])
 
+def admin_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Список карт", callback_data="admin_list")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="🎁 Создать промокод", callback_data="admin_promo")],
+        [InlineKeyboardButton(text="💰 Управление ценами", callback_data="admin_price")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+    ])
+
 def admin_promo_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💎 Карта", callback_data="admin_promo_card")],
@@ -310,183 +355,42 @@ def admin_promo_menu():
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
     ])
 
-def admin_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Список карт", callback_data="admin_list")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="🎁 Создать промокод", callback_data="admin_promo")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
-    ])
-
 # ===== БОТ =====
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ===== ХЕНДЛЕРЫ =====
-@dp.message(Command("start"))
+# ===== СТАРТ (без команд) =====
+@dp.message()
 async def start(message: Message):
-    create_user(message.from_user.id, message.from_user.username)
-    await message.answer(
-        "🏁 **IndyCard Exchange**\n\n"
-        "💰 Баланс: 500 💰\n"
-        "🎲 Попыток: 3/3ч\n\n"
-        "Выбирай действие:",
-        reply_markup=main_menu(),
-        parse_mode="Markdown"
-    )
+    if message.text == "/start":
+        create_user(message.from_user.id, message.from_user.username)
+        await message.answer(
+            "🏁 **IndyCard Exchange**\n\n"
+            "💰 Баланс: 500 💰\n"
+            "🎲 Попыток: 3/3ч\n\n"
+            "Выбирай действие:",
+            reply_markup=main_menu(),
+            parse_mode="Markdown"
+        )
+    else:
+        # Игнорируем все сообщения, кроме /start
+        await message.answer("Используй кнопки!", reply_markup=main_menu())
 
 @dp.message(Command("admin"))
-async def admin(message: Message):
+async def admin_command(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Нет доступа")
         return
     await message.answer("👑 **Админ-панель**", reply_markup=admin_menu(), parse_mode="Markdown")
 
-@dp.message(Command("setname"))
-async def setname(message: Message):
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        await message.answer("❌ Используй: /setname Твой ник")
-        return
-    name = parts[1].strip()
-    conn = sqlite3.connect("indycard.db")
-    c = conn.cursor()
-    c.execute("UPDATE users SET display_name = ? WHERE user_id = ?", (name, message.from_user.id))
-    conn.commit()
-    conn.close()
-    await message.answer(f"✅ Ник изменён на: {name}")
-
-@dp.message(Command("buy"))
-async def buy(message: Message):
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer("❌ Укажи код: /buy PAL")
-        return
-    code = parts[1].upper()
-    card = get_card_info(code)
-    if not card:
-        await message.answer("❌ Карта не найдена")
-        return
-    user = get_user(message.from_user.id)
-    if user[2] < card[5]:
-        await message.answer(f"❌ Нужно {card[5]} 💰")
-        return
-    update_balance(message.from_user.id, -card[5], "buy", code)
-    add_card_to_user(message.from_user.id, code)
-    await message.answer(f"✅ {card[1]} ({code}) куплена за {card[5]} 💰")
-
-@dp.message(Command("sell"))
-async def sell(message: Message):
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer("❌ Укажи код: /sell PAL")
-        return
-    code = parts[1].upper()
-    card = get_card_info(code)
-    if not card:
-        await message.answer("❌ Карта не найдена")
-        return
-    cards = get_user_cards(message.from_user.id)
-    if cards.get(code, 0) < 1:
-        await message.answer("❌ У тебя нет этой карты")
-        return
-    price = int(card[5] * 0.7)
-    remove_card_from_user(message.from_user.id, code)
-    update_balance(message.from_user.id, price, "sell", code)
-    await message.answer(f"✅ {card[1]} ({code}) продана за {price} 💰")
-
-@dp.message(Command("balance"))
-async def balance(message: Message):
-    user = get_user(message.from_user.id)
-    await message.answer(f"💰 Твой баланс: {user[2]} 💰")
-
-@dp.message(Command("top"))
-async def top(message: Message):
-    conn = sqlite3.connect("indycard.db")
-    c = conn.cursor()
-    c.execute("SELECT display_name, balance FROM users ORDER BY balance DESC LIMIT 10")
-    rows = c.fetchall()
-    conn.close()
-    text = "🏆 **Топ-10**\n\n"
-    for i, (name, balance) in enumerate(rows, 1):
-        text += f"{i}. {name} — {balance} 💰\n"
-    await message.answer(text, parse_mode="Markdown")
-
-@dp.message(Command("promo"))
-async def promo_use(message: Message):
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer("❌ Введи код: /promo КОД")
-        return
-    code = parts[1].upper()
-    result = use_promo(code, message.from_user.id)
-    await message.answer(f"🎁 **Результат**\n\n{result['message']}", parse_mode="Markdown")
-
-@dp.message(Command("promo_coins"))
-async def promo_coins_create(message: Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа")
-        return
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer("❌ Используй: /promo_coins 100")
-        return
-    amount = parts[1]
-    code = create_promo("coins", amount, 10, message.from_user.id)
-    await message.answer(
-        f"🎁 **Промокод создан!**\n\n"
-        f"Код: `{code}`\n"
-        f"Награда: {amount} 💰\n"
-        f"Активаций: 10\n\n"
-        f"Отправь код пользователям.",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("give"))
-async def give_command(message: Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа")
-        return
-    parts = message.text.split(maxsplit=2)
-    if len(parts) < 3:
-        await message.answer("❌ Используй: /give @username 100")
-        return
-    target = parts[1].strip()
-    value = parts[2].strip()
-    target_id = None
-    if target.startswith("@"):
-        target = target[1:]
-        conn = sqlite3.connect("indycard.db")
-        c = conn.cursor()
-        c.execute("SELECT user_id FROM users WHERE username = ?", (target,))
-        row = c.fetchone()
-        conn.close()
-        if not row:
-            await message.answer(f"❌ Пользователь @{target} не найден")
-            return
-        target_id = row[0]
-    else:
-        try:
-            target_id = int(target)
-        except:
-            await message.answer("❌ Неверный формат")
-            return
-    if value.isdigit():
-        amount = int(value)
-        update_balance(target_id, amount, "admin_give")
-        await message.answer(f"✅ Выдано {amount} 💰 пользователю {target}")
-        return
-    card = get_card_info(value.upper())
-    if card:
-        add_card_to_user(target_id, value.upper())
-        await message.answer(f"✅ Выдана карта {card[1]} ({value.upper()}) пользователю {target}")
-        return
-    await message.answer("❌ Неверный формат")
-
 # ===== КНОПКИ =====
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu_callback(call: CallbackQuery):
-    await call.message.edit_text("🏁 **Главное меню**", reply_markup=main_menu(), parse_mode="Markdown")
+    await call.message.edit_text(
+        "🏁 **Главное меню**",
+        reply_markup=main_menu(),
+        parse_mode="Markdown"
+    )
     await call.answer()
 
 @dp.callback_query(F.data == "my_cards")
@@ -496,12 +400,26 @@ async def my_cards(call: CallbackQuery):
         await call.message.edit_text("📭 Нет карт", reply_markup=back_menu(), parse_mode="Markdown")
         await call.answer()
         return
+    
+    rarity_order = {"ULTIMATE": 0, "INDY_EDITION": 1, "LEGENDARY": 2, "EXCLUSIVE": 3, "RARE": 4, "REGULAR": 5}
+    sorted_cards = sorted(cards.items(), key=lambda x: rarity_order.get(get_card_info(x[0])[4], 99))
+    
     text = "🎴 **Мои карты**\n\n"
-    for code, qty in cards.items():
+    for code, qty in sorted_cards:
         card = get_card_info(code)
-        if card:
-            text += f"{get_rarity_emoji(card[4])} {card[1]} ({code}) ×{qty}\n"
-    await call.message.edit_text(text, reply_markup=back_menu(), parse_mode="Markdown")
+        if not card:
+            continue
+        emoji = get_rarity_emoji(card[4])
+        text += f"{emoji} {card[1]} ({code}) ×{qty}\n"
+    
+    text += f"\n📊 Всего: {sum(cards.values())} карт"
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💸 Продать карту", callback_data="sell_menu")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+    ])
+    
+    await call.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
     await call.answer()
 
 @dp.callback_query(F.data == "get_card")
@@ -538,44 +456,410 @@ async def exchange(call: CallbackQuery):
     c.execute("SELECT code, name, rarity, price, change_24h FROM cards ORDER BY price DESC LIMIT 10")
     rows = c.fetchall()
     conn.close()
+    
     if not rows:
         await call.message.edit_text("📭 Нет карт", reply_markup=back_menu())
         await call.answer()
         return
+    
     text = "🏦 **Биржа**\n\n💰 Баланс: {}\n\n".format(user[2])
     for code, name, rarity, price, change in rows:
         emoji = get_rarity_emoji(rarity)
         arrow = "📈" if change > 0 else "📉" if change < 0 else "➡️"
         text += f"{emoji} {name} ({code}) — {price} 💰 {arrow} {change:.1f}%\n"
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 Купить", callback_data="exchange_buy"),
-         InlineKeyboardButton(text="💸 Продать", callback_data="exchange_sell")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
-    ])
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[])
+    for code, name, rarity, price, change in rows:
+        markup.inline_keyboard.append([
+            InlineKeyboardButton(text=f"💎 {name} ({code}) — {price} 💰", callback_data=f"buy_{code}")
+        ])
+    markup.inline_keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")])
+    
     await call.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
     await call.answer()
 
-@dp.callback_query(F.data == "exchange_buy")
-async def exchange_buy(call: CallbackQuery):
+@dp.callback_query(F.data.startswith("buy_"))
+async def buy_card_from_exchange(call: CallbackQuery):
+    code = call.data.replace("buy_", "")
+    user_id = call.from_user.id
+    
+    card = get_card_info(code)
+    if not card:
+        await call.answer("❌ Карта не найдена")
+        return
+    
+    user = get_user(user_id)
+    if user[2] < card[5]:
+        await call.answer(f"❌ Нужно {card[5]} 💰", show_alert=True)
+        return
+    
+    update_balance(user_id, -card[5], "buy", code)
+    add_card_to_user(user_id, code)
+    
     await call.message.edit_text(
-        "💎 **Покупка**\n\nВведи код: `/buy PAL`",
+        f"✅ {card[1]} ({code}) куплена за {card[5]} 💰\n"
+        f"💰 Новый баланс: {user[2] - card[5]} 💰",
         reply_markup=back_menu(),
         parse_mode="Markdown"
     )
     await call.answer()
 
-@dp.callback_query(F.data == "exchange_sell")
-async def exchange_sell(call: CallbackQuery):
-    cards = get_user_cards(call.from_user.id)
-    if not cards:
-        await call.message.edit_text("📭 Нет карт", reply_markup=back_menu())
+@dp.callback_query(F.data == "player_market")
+async def player_market(call: CallbackQuery):
+    listings = get_market_listings()
+    if not listings:
+        await call.message.edit_text(
+            "📊 **Рынок игроков**\n\nНа рынке пока нет карт.\n"
+            "Ты можешь выставить свою карту через 'Мои карты'.",
+            reply_markup=back_menu(),
+            parse_mode="Markdown"
+        )
         await call.answer()
         return
+    
+    text = "📊 **Рынок игроков**\n\n"
+    for listing_id, user_id, card_code, price in listings:
+        card = get_card_info(card_code)
+        if not card:
+            continue
+        seller = get_user(user_id)
+        seller_name = seller[1] or seller[3] or "Неизвестно"
+        emoji = get_rarity_emoji(card[4])
+        text += f"{emoji} {card[1]} ({card[0]}) — {price} 💰 (от @{seller_name})\n"
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[])
+    for listing_id, user_id, card_code, price in listings:
+        card = get_card_info(card_code)
+        if not card:
+            continue
+        markup.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=f"💎 Купить {card[1]} ({card[0]}) за {price} 💰",
+                callback_data=f"market_buy_{listing_id}"
+            )
+        ])
+    markup.inline_keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")])
+    
+    await call.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("market_buy_"))
+async def market_buy(call: CallbackQuery):
+    listing_id = int(call.data.replace("market_buy_", ""))
+    buyer_id = call.from_user.id
+    
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("SELECT user_id, card_code, price FROM market_listings WHERE id = ? AND status = 'active'", (listing_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        await call.answer("❌ Карта уже продана", show_alert=True)
+        return
+    
+    seller_id, card_code, price = row
+    
+    if buyer_id == seller_id:
+        await call.answer("❌ Нельзя купить свою карту", show_alert=True)
+        return
+    
+    buyer = get_user(buyer_id)
+    if buyer[2] < price:
+        await call.answer(f"❌ Нужно {price} 💰", show_alert=True)
+        return
+    
+    seller_cards = get_user_cards(seller_id)
+    if seller_cards.get(card_code, 0) < 1:
+        await call.answer("❌ У продавца больше нет этой карты", show_alert=True)
+        return
+    
+    update_balance(buyer_id, -price, "market_buy", card_code)
+    update_balance(seller_id, price, "market_sell", card_code)
+    remove_card_from_user(seller_id, card_code)
+    add_card_to_user(buyer_id, card_code)
+    remove_market_listing(listing_id)
+    
     await call.message.edit_text(
-        "💸 **Продажа**\n\nВведи код: `/sell PAL`",
+        f"✅ Покупка совершена!\n\n"
+        f"Карта {card_code} куплена за {price} 💰",
         reply_markup=back_menu(),
         parse_mode="Markdown"
     )
+    await call.answer()
+
+@dp.callback_query(F.data == "sell_menu")
+async def sell_menu(call: CallbackQuery):
+    user_id = call.from_user.id
+    cards = get_user_cards(user_id)
+    if not cards:
+        await call.message.edit_text("📭 Нет карт для продажи", reply_markup=back_menu())
+        await call.answer()
+        return
+    
+    card_list = list(cards.keys())
+    rarity_order = {"ULTIMATE": 0, "INDY_EDITION": 1, "LEGENDARY": 2, "EXCLUSIVE": 3, "RARE": 4, "REGULAR": 5}
+    card_list.sort(key=lambda x: rarity_order.get(get_card_info(x)[4], 99))
+    
+    user_sell_session[user_id] = {"cards": card_list, "index": 0}
+    await show_sell_card(call.message, user_id)
+    await call.answer()
+
+async def show_sell_card(message, user_id):
+    session = user_sell_session.get(user_id)
+    if not session:
+        return
+    
+    index = session["index"]
+    cards = session["cards"]
+    if index >= len(cards):
+        index = 0
+        session["index"] = 0
+    
+    code = cards[index]
+    card = get_card_info(code)
+    if not card:
+        return
+    
+    qty = get_user_cards(user_id).get(code, 0)
+    price = int(card[5] * 0.7)
+    total = len(cards)
+    emoji = get_rarity_emoji(card[4])
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="◀️", callback_data="sell_prev"),
+            InlineKeyboardButton(text=f"{index+1}/{total}", callback_data="sell_count"),
+            InlineKeyboardButton(text="▶️", callback_data="sell_next")
+        ],
+        [
+            InlineKeyboardButton(text=f"💰 Продать за {price} 💰", callback_data=f"sell_confirm_{code}")
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+        ]
+    ])
+    
+    await message.edit_text(
+        f"💵 **Продажа карты**\n\n"
+        f"{emoji} {card[1]} ({card[0]})\n"
+        f"🏁 {card[2]}\n"
+        f"🎴 {card[4]}\n"
+        f"💰 Цена: {card[5]} 💰\n"
+        f"💸 Продажа за: {price} 💰\n"
+        f"📦 Количество: {qty}\n\n"
+        f"Карта {index+1} из {total}",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data == "sell_next")
+async def sell_next(call: CallbackQuery):
+    user_id = call.from_user.id
+    if user_id not in user_sell_session:
+        await call.answer("❌ Сессия истекла")
+        return
+    user_sell_session[user_id]["index"] += 1
+    await show_sell_card(call.message, user_id)
+    await call.answer()
+
+@dp.callback_query(F.data == "sell_prev")
+async def sell_prev(call: CallbackQuery):
+    user_id = call.from_user.id
+    if user_id not in user_sell_session:
+        await call.answer("❌ Сессия истекла")
+        return
+    user_sell_session[user_id]["index"] -= 1
+    if user_sell_session[user_id]["index"] < 0:
+        user_sell_session[user_id]["index"] = 0
+    await show_sell_card(call.message, user_id)
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("sell_confirm_"))
+async def sell_confirm(call: CallbackQuery):
+    code = call.data.replace("sell_confirm_", "")
+    user_id = call.from_user.id
+    
+    card = get_card_info(code)
+    if not card:
+        await call.answer("❌ Карта не найдена")
+        return
+    
+    cards = get_user_cards(user_id)
+    if cards.get(code, 0) < 1:
+        await call.answer("❌ У тебя нет этой карты")
+        return
+    
+    price = int(card[5] * 0.7)
+    remove_card_from_user(user_id, code)
+    update_balance(user_id, price, "sell", code)
+    
+    remaining = get_user_cards(user_id)
+    if not remaining:
+        await call.message.edit_text(
+            f"✅ {card[1]} ({code}) продана за {price} 💰\n"
+            f"💰 Новый баланс: {get_user(user_id)[2]} 💰\n\n"
+            "📭 У тебя больше нет карт",
+            reply_markup=back_menu(),
+            parse_mode="Markdown"
+        )
+        await call.answer()
+        return
+    
+    if user_id in user_sell_session:
+        user_sell_session[user_id]["cards"] = list(remaining.keys())
+        if user_sell_session[user_id]["index"] >= len(user_sell_session[user_id]["cards"]):
+            user_sell_session[user_id]["index"] = 0
+        await show_sell_card(call.message, user_id)
+    await call.answer()
+
+# ===== ВЫСТАВЛЕНИЕ НА РЫНОК =====
+@dp.callback_query(F.data == "market_sell")
+async def market_sell_start(call: CallbackQuery):
+    user_id = call.from_user.id
+    cards = get_user_cards(user_id)
+    if not cards:
+        await call.message.edit_text("📭 Нет карт для продажи", reply_markup=back_menu())
+        await call.answer()
+        return
+    
+    card_list = list(cards.keys())
+    rarity_order = {"ULTIMATE": 0, "INDY_EDITION": 1, "LEGENDARY": 2, "EXCLUSIVE": 3, "RARE": 4, "REGULAR": 5}
+    card_list.sort(key=lambda x: rarity_order.get(get_card_info(x)[4], 99))
+    
+    user_market_session[user_id] = {"cards": card_list, "index": 0, "price": 0}
+    await show_market_card(call.message, user_id)
+    await call.answer()
+
+async def show_market_card(message, user_id):
+    session = user_market_session.get(user_id)
+    if not session:
+        return
+    
+    index = session["index"]
+    cards = session["cards"]
+    if index >= len(cards):
+        index = 0
+        session["index"] = 0
+    
+    code = cards[index]
+    card = get_card_info(code)
+    if not card:
+        return
+    
+    qty = get_user_cards(user_id).get(code, 0)
+    price = session.get("price", card[5])
+    total = len(cards)
+    emoji = get_rarity_emoji(card[4])
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="◀️", callback_data="market_prev"),
+            InlineKeyboardButton(text=f"{index+1}/{total}", callback_data="market_count"),
+            InlineKeyboardButton(text="▶️", callback_data="market_next")
+        ],
+        [
+            InlineKeyboardButton(text="🔽 -10", callback_data="market_price_-10"),
+            InlineKeyboardButton(text=f"{price} 💰", callback_data="market_price_show"),
+            InlineKeyboardButton(text="🔼 +10", callback_data="market_price_+10")
+        ],
+        [
+            InlineKeyboardButton(text=f"📊 Выставить за {price} 💰", callback_data=f"market_list_{code}")
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+        ]
+    ])
+    
+    await message.edit_text(
+        f"📊 **Выставление на рынок**\n\n"
+        f"{emoji} {card[1]} ({card[0]})\n"
+        f"🏁 {card[2]}\n"
+        f"🎴 {card[4]}\n"
+        f"💰 Базовая цена: {card[5]} 💰\n"
+        f"📦 Количество: {qty}\n\n"
+        f"Установи цену кнопками и нажми 'Выставить'",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data.startswith("market_price_"))
+async def market_price_change(call: CallbackQuery):
+    user_id = call.from_user.id
+    if user_id not in user_market_session:
+        await call.answer("❌ Сессия истекла")
+        return
+    
+    change = int(call.data.replace("market_price_", ""))
+    session = user_market_session[user_id]
+    card = get_card_info(session["cards"][session["index"]])
+    if not card:
+        return
+    
+    new_price = session.get("price", card[5]) + change
+    if new_price < 10:
+        new_price = 10
+    session["price"] = new_price
+    
+    await show_market_card(call.message, user_id)
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("market_list_"))
+async def market_list(call: CallbackQuery):
+    user_id = call.from_user.id
+    code = call.data.replace("market_list_", "")
+    
+    if user_id not in user_market_session:
+        await call.answer("❌ Сессия истекла")
+        return
+    
+    session = user_market_session[user_id]
+    price = session.get("price", 0)
+    
+    if price < 10:
+        await call.answer("❌ Цена должна быть не меньше 10 💰", show_alert=True)
+        return
+    
+    card = get_card_info(code)
+    if not card:
+        await call.answer("❌ Карта не найдена")
+        return
+    
+    cards = get_user_cards(user_id)
+    if cards.get(code, 0) < 1:
+        await call.answer("❌ У тебя нет этой карты")
+        return
+    
+    add_market_listing(user_id, code, price)
+    remove_card_from_user(user_id, code)
+    
+    await call.message.edit_text(
+        f"✅ Карта {card[1]} ({code}) выставлена на рынок за {price} 💰",
+        reply_markup=back_menu(),
+        parse_mode="Markdown"
+    )
+    await call.answer()
+
+@dp.callback_query(F.data == "market_next")
+async def market_next(call: CallbackQuery):
+    user_id = call.from_user.id
+    if user_id not in user_market_session:
+        await call.answer("❌ Сессия истекла")
+        return
+    user_market_session[user_id]["index"] += 1
+    await show_market_card(call.message, user_id)
+    await call.answer()
+
+@dp.callback_query(F.data == "market_prev")
+async def market_prev(call: CallbackQuery):
+    user_id = call.from_user.id
+    if user_id not in user_market_session:
+        await call.answer("❌ Сессия истекла")
+        return
+    user_market_session[user_id]["index"] -= 1
+    if user_market_session[user_id]["index"] < 0:
+        user_market_session[user_id]["index"] = 0
+    await show_market_card(call.message, user_id)
     await call.answer()
 
 @dp.callback_query(F.data == "shop")
@@ -670,11 +954,25 @@ async def about(call: CallbackQuery):
 @dp.callback_query(F.data == "promo_enter")
 async def promo_enter(call: CallbackQuery):
     await call.message.edit_text(
-        "🎁 **Активация промокода**\n\nВведи код:\n`/promo КОД`",
+        "🎁 **Активация промокода**\n\nВведи код в сообщении",
         reply_markup=back_menu(),
         parse_mode="Markdown"
     )
     await call.answer()
+
+# ===== ПРОМОКОД ЧЕРЕЗ СООБЩЕНИЕ =====
+@dp.message()
+async def handle_promo_message(message: Message):
+    user_id = message.from_user.id
+    text = message.text.strip()
+    
+    # Проверяем, не является ли это промокодом
+    if len(text) == 8 and text.isalnum():
+        result = use_promo(text.upper(), user_id)
+        await message.answer(f"🎁 **Результат**\n\n{result['message']}", parse_mode="Markdown")
+    else:
+        # Игнорируем всё остальное
+        pass
 
 # ===== МИНИ-ИГРЫ =====
 @dp.callback_query(F.data == "game_guess")
@@ -849,11 +1147,28 @@ async def admin_promo_coins(call: CallbackQuery):
     if not is_admin(call.from_user.id):
         return
     await call.message.edit_text(
-        "💵 Введите сумму монет для промокода:\n`/promo_coins 100`",
+        "💵 Введите сумму монет для промокода в сообщении",
         reply_markup=back_menu(),
         parse_mode="Markdown"
     )
     await call.answer()
+
+@dp.message()
+async def handle_admin_promo_coins(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    try:
+        amount = int(message.text.strip())
+        code = create_promo("coins", str(amount), 10, message.from_user.id)
+        await message.answer(
+            f"🎁 **Промокод создан!**\n\n"
+            f"Код: `{code}`\n"
+            f"Награда: {amount} 💰\n"
+            f"Активаций: 10",
+            parse_mode="Markdown"
+        )
+    except ValueError:
+        await message.answer("❌ Введи число")
 
 @dp.callback_query(F.data.startswith("promo_card_"))
 async def promo_card_create(call: CallbackQuery):
@@ -866,12 +1181,140 @@ async def promo_card_create(call: CallbackQuery):
         f"🎁 **Промокод создан!**\n\n"
         f"Код: `{code}`\n"
         f"Награда: {card[1]} ({card[0]})\n"
-        f"Активаций: 5\n\n"
-        f"Отправь код пользователям.",
+        f"Активаций: 5",
         reply_markup=back_menu(),
         parse_mode="Markdown"
     )
     await call.answer()
+
+@dp.callback_query(F.data == "admin_price")
+async def admin_price_menu(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("⛔ Нет доступа", show_alert=True)
+        return
+    
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("SELECT code, name, rarity, price FROM cards ORDER BY price DESC LIMIT 20")
+    rows = c.fetchall()
+    conn.close()
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[])
+    for code, name, rarity, price in rows:
+        emoji = get_rarity_emoji(rarity)
+        markup.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=f"{emoji} {name} ({code}) — {price} 💰",
+                callback_data=f"price_edit_{code}"
+            )
+        ])
+    markup.inline_keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")])
+    
+    await call.message.edit_text(
+        "💰 **Управление ценами**\n\nВыбери карту для изменения цены:",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("price_edit_"))
+async def price_edit(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("⛔ Нет доступа", show_alert=True)
+        return
+    
+    code = call.data.replace("price_edit_", "")
+    card = get_card_info(code)
+    if not card:
+        await call.answer("❌ Карта не найдена")
+        return
+    
+    admin_price_session[call.from_user.id] = code
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔽 -10", callback_data=f"price_change_-10"),
+            InlineKeyboardButton(text="🔼 +10", callback_data=f"price_change_+10")
+        ],
+        [
+            InlineKeyboardButton(text="🔽 -50", callback_data=f"price_change_-50"),
+            InlineKeyboardButton(text="🔼 +50", callback_data=f"price_change_+50")
+        ],
+        [
+            InlineKeyboardButton(text="🔽 -100", callback_data=f"price_change_-100"),
+            InlineKeyboardButton(text="🔼 +100", callback_data=f"price_change_+100")
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="admin_price")
+        ]
+    ])
+    
+    await call.message.edit_text(
+        f"💰 **Изменение цены**\n\n"
+        f"{get_rarity_emoji(card[4])} {card[1]} ({card[0]})\n"
+        f"Текущая цена: {card[5]} 💰\n\n"
+        f"Выбери изменение:",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("price_change_"))
+async def price_change(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("⛔ Нет доступа", show_alert=True)
+        return
+    
+    change = int(call.data.replace("price_change_", ""))
+    code = admin_price_session.get(call.from_user.id)
+    if not code:
+        await call.answer("❌ Сессия истекла")
+        return
+    
+    card = get_card_info(code)
+    if not card:
+        await call.answer("❌ Карта не найдена")
+        return
+    
+    new_price = card[5] + change
+    if new_price < 10:
+        new_price = 10
+    
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("UPDATE cards SET price = ? WHERE code = ?", (new_price, code))
+    conn.commit()
+    conn.close()
+    
+    await call.answer(f"✅ Цена изменена: {card[5]} → {new_price} 💰")
+    
+    card = get_card_info(code)
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔽 -10", callback_data=f"price_change_-10"),
+            InlineKeyboardButton(text="🔼 +10", callback_data=f"price_change_+10")
+        ],
+        [
+            InlineKeyboardButton(text="🔽 -50", callback_data=f"price_change_-50"),
+            InlineKeyboardButton(text="🔼 +50", callback_data=f"price_change_+50")
+        ],
+        [
+            InlineKeyboardButton(text="🔽 -100", callback_data=f"price_change_-100"),
+            InlineKeyboardButton(text="🔼 +100", callback_data=f"price_change_+100")
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="admin_price")
+        ]
+    ])
+    
+    await call.message.edit_text(
+        f"💰 **Изменение цены**\n\n"
+        f"{get_rarity_emoji(card[4])} {card[1]} ({card[0]})\n"
+        f"Текущая цена: {card[5]} 💰\n\n"
+        f"Выбери изменение:",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
 
 # ===== ФОН =====
 async def update_prices():
