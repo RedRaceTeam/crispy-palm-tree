@@ -34,7 +34,7 @@ RARITIES = {
     "ULTIMATE": {"emoji": "👑", "rating": 150, "chance": 1},
 }
 
-# ===== БАЗА =====
+# ===== БАЗА ДАННЫХ =====
 def init_db():
     conn = sqlite3.connect("indycard.db")
     c = conn.cursor()
@@ -99,6 +99,16 @@ def init_db():
         price INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         status TEXT DEFAULT 'active'
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS pvp_battles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        player1_id INTEGER,
+        player2_id INTEGER,
+        bet_type TEXT,
+        bet_value TEXT,
+        status TEXT DEFAULT 'waiting',
+        winner_id INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""")
     conn.commit()
     conn.close()
@@ -302,23 +312,62 @@ def update_card_price(code, change):
     conn.commit()
     conn.close()
 
+def create_pvp_battle(player1_id, bet_type, bet_value):
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO pvp_battles (player1_id, bet_type, bet_value, status) VALUES (?, ?, ?, 'waiting')",
+              (player1_id, bet_type, bet_value))
+    battle_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return battle_id
+
+def get_pvp_battle(battle_id):
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("SELECT * FROM pvp_battles WHERE id = ?", (battle_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def join_pvp_battle(battle_id, player2_id):
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("UPDATE pvp_battles SET player2_id = ?, status = 'active' WHERE id = ?", (player2_id, battle_id))
+    conn.commit()
+    conn.close()
+
+def finish_pvp_battle(battle_id, winner_id):
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("UPDATE pvp_battles SET status = 'finished', winner_id = ? WHERE id = ?", (winner_id, battle_id))
+    conn.commit()
+    conn.close()
+
 # ===== СЕССИИ =====
-user_market_session = {}  # {user_id: {"cards": [], "index": 0, "price": 0}}
-admin_price_session = {}  # {user_id: code}
-user_sell_session = {}    # {user_id: {"cards": [], "index": 0}}
+user_market_session = {}
+admin_price_session = {}
+user_sell_session = {}
+pvp_sessions = {}
 
 # ===== КЛАВИАТУРЫ =====
-def main_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
+def main_menu(user_id=None):
+    markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎴 Мои карты", callback_data="my_cards"),
          InlineKeyboardButton(text="🎲 Получить карту", callback_data="get_card")],
         [InlineKeyboardButton(text="🏦 Биржа", callback_data="exchange"),
-         InlineKeyboardButton(text="📊 Рынок игроков", callback_data="player_market")],
+         InlineKeyboardButton(text="📊 Рынок", callback_data="player_market")],
+        [InlineKeyboardButton(text="⚔️ PvP Кубики", callback_data="pvp_menu")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
          InlineKeyboardButton(text="🏪 Магазин", callback_data="shop")],
         [InlineKeyboardButton(text="🎁 Промокод", callback_data="promo_enter"),
          InlineKeyboardButton(text="ℹ️ О проекте", callback_data="about")]
     ])
+    if user_id and is_admin(user_id):
+        markup.inline_keyboard.append([
+            InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin_panel")
+        ])
+    return markup
 
 def back_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -329,6 +378,7 @@ def games_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎲 Угадай пилота", callback_data="game_guess")],
         [InlineKeyboardButton(text="🎲 Бросок кубиков", callback_data="game_dice")],
+        [InlineKeyboardButton(text="⚔️ PvP Кубики", callback_data="pvp_menu")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
     ])
 
@@ -355,40 +405,49 @@ def admin_promo_menu():
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
     ])
 
+def pvp_bet_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Деньги", callback_data="pvp_bet_money")],
+        [InlineKeyboardButton(text="🎴 Карта", callback_data="pvp_bet_card")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+    ])
+
 # ===== БОТ =====
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ===== СТАРТ (без команд) =====
-@dp.message()
-async def start(message: Message):
-    if message.text == "/start":
-        create_user(message.from_user.id, message.from_user.username)
-        await message.answer(
-            "🏁 **IndyCard Exchange**\n\n"
-            "💰 Баланс: 500 💰\n"
-            "🎲 Попыток: 3/3ч\n\n"
-            "Выбирай действие:",
-            reply_markup=main_menu(),
-            parse_mode="Markdown"
-        )
-    else:
-        # Игнорируем все сообщения, кроме /start
-        await message.answer("Используй кнопки!", reply_markup=main_menu())
+# ===== СТАРТ =====
+@dp.message(Command("start"))
+async def start_command(message: Message):
+    create_user(message.from_user.id, message.from_user.username)
+    await message.answer(
+        "🏁 **IndyCard Exchange**\n\n"
+        "💰 Баланс: 500 💰\n"
+        "🎲 Попыток: 3/3ч\n\n"
+        "Выбирай действие:",
+        reply_markup=main_menu(message.from_user.id),
+        parse_mode="Markdown"
+    )
 
-@dp.message(Command("admin"))
-async def admin_command(message: Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("⛔ Нет доступа")
+# ===== МЯГКАЯ ОБРАБОТКА СООБЩЕНИЙ =====
+@dp.message()
+async def handle_messages(message: Message):
+    text = message.text.strip()
+    
+    # Проверяем промокод (8 символов, буквы+цифры)
+    if len(text) == 8 and text.isalnum():
+        result = use_promo(text.upper(), message.from_user.id)
+        await message.answer(f"🎁 **Результат**\n\n{result['message']}", parse_mode="Markdown")
         return
-    await message.answer("👑 **Админ-панель**", reply_markup=admin_menu(), parse_mode="Markdown")
+    
+    # Всё остальное игнорируем, чтобы не бесить пользователя
 
 # ===== КНОПКИ =====
 @dp.callback_query(F.data == "back_to_menu")
 async def back_to_menu_callback(call: CallbackQuery):
     await call.message.edit_text(
         "🏁 **Главное меню**",
-        reply_markup=main_menu(),
+        reply_markup=main_menu(call.from_user.id),
         parse_mode="Markdown"
     )
     await call.answer()
@@ -416,6 +475,7 @@ async def my_cards(call: CallbackQuery):
     
     markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💸 Продать карту", callback_data="sell_menu")],
+        [InlineKeyboardButton(text="📊 Выставить на рынок", callback_data="market_sell")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
     ])
     
@@ -713,13 +773,13 @@ async def sell_confirm(call: CallbackQuery):
         await show_sell_card(call.message, user_id)
     await call.answer()
 
-# ===== ВЫСТАВЛЕНИЕ НА РЫНОК =====
+# ===== РЫНОК (ВЫСТАВЛЕНИЕ) =====
 @dp.callback_query(F.data == "market_sell")
 async def market_sell_start(call: CallbackQuery):
     user_id = call.from_user.id
     cards = get_user_cards(user_id)
     if not cards:
-        await call.message.edit_text("📭 Нет карт для продажи", reply_markup=back_menu())
+        await call.message.edit_text("📭 Нет карт для выставления", reply_markup=back_menu())
         await call.answer()
         return
     
@@ -862,6 +922,190 @@ async def market_prev(call: CallbackQuery):
     await show_market_card(call.message, user_id)
     await call.answer()
 
+# ===== PVP КУБИКИ =====
+@dp.callback_query(F.data == "pvp_menu")
+async def pvp_menu(call: CallbackQuery):
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎲 Создать битву", callback_data="pvp_create")],
+        [InlineKeyboardButton(text="📋 Список битв", callback_data="pvp_list")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+    ])
+    await call.message.edit_text(
+        "⚔️ **PvP Кубики**\n\n"
+        "Создай битву или присоединись к существующей.\n"
+        "Ставка: деньги или карта.\n"
+        "У кого больше выпало на кубиках — тот и выиграл!",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+    await call.answer()
+
+@dp.callback_query(F.data == "pvp_create")
+async def pvp_create(call: CallbackQuery):
+    await call.message.edit_text(
+        "⚔️ **Создание битвы**\n\n"
+        "Что ставишь?",
+        reply_markup=pvp_bet_menu(),
+        parse_mode="Markdown"
+    )
+    await call.answer()
+
+@dp.callback_query(F.data == "pvp_bet_money")
+async def pvp_bet_money(call: CallbackQuery):
+    await call.message.edit_text(
+        "💰 **Ставка деньгами**\n\n"
+        "Введите сумму в сообщении",
+        reply_markup=back_menu(),
+        parse_mode="Markdown"
+    )
+    pvp_sessions[call.from_user.id] = {"type": "money"}
+    await call.answer()
+
+@dp.callback_query(F.data == "pvp_bet_card")
+async def pvp_bet_card(call: CallbackQuery):
+    user_id = call.from_user.id
+    cards = get_user_cards(user_id)
+    if not cards:
+        await call.message.edit_text("📭 У тебя нет карт для ставки", reply_markup=back_menu())
+        await call.answer()
+        return
+    
+    # Показываем список карт для выбора
+    markup = InlineKeyboardMarkup(inline_keyboard=[])
+    for code, qty in cards.items():
+        card = get_card_info(code)
+        if card:
+            markup.inline_keyboard.append([
+                InlineKeyboardButton(
+                    text=f"{get_rarity_emoji(card[4])} {card[1]} ({code}) ×{qty}",
+                    callback_data=f"pvp_card_{code}"
+                )
+            ])
+    markup.inline_keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="pvp_menu")])
+    
+    await call.message.edit_text(
+        "🎴 **Выбери карту для ставки**",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+    pvp_sessions[user_id] = {"type": "card"}
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("pvp_card_"))
+async def pvp_card_select(call: CallbackQuery):
+    user_id = call.from_user.id
+    code = call.data.replace("pvp_card_", "")
+    pvp_sessions[user_id]["card"] = code
+    
+    # Создаём битву
+    battle_id = create_pvp_battle(user_id, "card", code)
+    await call.message.edit_text(
+        f"⚔️ **Битва создана!**\n\n"
+        f"ID: {battle_id}\n"
+        f"Ставка: карта {get_card_info(code)[1]}\n\n"
+        f"Ожидаем соперника...\n"
+        f"Дай этот ID другу: {battle_id}",
+        reply_markup=back_menu(),
+        parse_mode="Markdown"
+    )
+    await call.answer()
+
+@dp.message()
+async def handle_pvp_bet(message: Message):
+    user_id = message.from_user.id
+    if user_id in pvp_sessions and pvp_sessions[user_id].get("type") == "money":
+        try:
+            amount = int(message.text.strip())
+            if amount < 10:
+                await message.answer("❌ Минимальная ставка 10 💰")
+                return
+            if get_user(user_id)[2] < amount:
+                await message.answer("❌ Недостаточно средств")
+                return
+            battle_id = create_pvp_battle(user_id, "money", str(amount))
+            await message.answer(
+                f"⚔️ **Битва создана!**\n\n"
+                f"ID: {battle_id}\n"
+                f"Ставка: {amount} 💰\n\n"
+                f"Ожидаем соперника...\n"
+                f"Дай этот ID другу: {battle_id}",
+                reply_markup=back_menu(),
+                parse_mode="Markdown"
+            )
+        except ValueError:
+            await message.answer("❌ Введите число")
+        pvp_sessions.pop(user_id, None)
+        return
+
+@dp.callback_query(F.data == "pvp_list")
+async def pvp_list(call: CallbackQuery):
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("SELECT id, player1_id, bet_type, bet_value FROM pvp_battles WHERE status = 'waiting'")
+    rows = c.fetchall()
+    conn.close()
+    
+    if not rows:
+        await call.message.edit_text("📭 Нет активных битв", reply_markup=back_menu())
+        await call.answer()
+        return
+    
+    text = "⚔️ **Активные битвы**\n\n"
+    markup = InlineKeyboardMarkup(inline_keyboard=[])
+    for battle_id, player1_id, bet_type, bet_value in rows:
+        player = get_user(player1_id)
+        player_name = player[1] or player[3] or "Неизвестно"
+        bet_text = f"{bet_value} 💰" if bet_type == "money" else f"карта {bet_value}"
+        text += f"ID {battle_id}: @{player_name} ставит {bet_text}\n"
+        markup.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=f"⚔️ Присоединиться к {battle_id}",
+                callback_data=f"pvp_join_{battle_id}"
+            )
+        ])
+    markup.inline_keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="pvp_menu")])
+    
+    await call.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("pvp_join_"))
+async def pvp_join(call: CallbackQuery):
+    battle_id = int(call.data.replace("pvp_join_", ""))
+    player2_id = call.from_user.id
+    
+    battle = get_pvp_battle(battle_id)
+    if not battle or battle[4] != "waiting":
+        await call.answer("❌ Битва уже завершена", show_alert=True)
+        return
+    
+    if battle[1] == player2_id:
+        await call.answer("❌ Нельзя присоединиться к своей битве", show_alert=True)
+        return
+    
+    join_pvp_battle(battle_id, player2_id)
+    
+    # Бросаем кубики
+    d1_p1, d2_p1 = random.randint(1, 6), random.randint(1, 6)
+    d1_p2, d2_p2 = random.randint(1, 6), random.randint(1, 6)
+    total_p1 = d1_p1 + d2_p1
+    total_p2 = d1_p2 + d2_p2
+    
+    winner_id = battle[1] if total_p1 > total_p2 else player2_id if total_p2 > total_p1 else None
+    
+    finish_pvp_battle(battle_id, winner_id)
+    
+    # Отправляем результат
+    await call.message.edit_text(
+        f"⚔️ **Результат битвы {battle_id}**\n\n"
+        f"Игрок 1: {d1_p1} + {d2_p1} = {total_p1}\n"
+        f"Игрок 2: {d1_p2} + {d2_p2} = {total_p2}\n\n"
+        f"{'🏆 Победил Игрок 1!' if winner_id == battle[1] else '🏆 Победил Игрок 2!' if winner_id else '🤝 Ничья!'}",
+        reply_markup=back_menu(),
+        parse_mode="Markdown"
+    )
+    await call.answer()
+
+# ===== ПРОЧЕЕ =====
 @dp.callback_query(F.data == "shop")
 async def shop(call: CallbackQuery):
     await call.message.edit_text(
@@ -915,16 +1159,6 @@ async def shop_card(call: CallbackQuery):
         await call.message.edit_text("❌ Нет карт", reply_markup=back_menu())
     await call.answer()
 
-@dp.callback_query(F.data == "games")
-async def games(call: CallbackQuery):
-    attempts = get_game_attempts(call.from_user.id)
-    await call.message.edit_text(
-        f"🎮 **Мини-игры**\n\n🎲 Попыток: {attempts}/3\n\nВыбери игру:",
-        reply_markup=games_menu(),
-        parse_mode="Markdown"
-    )
-    await call.answer()
-
 @dp.callback_query(F.data == "profile")
 async def profile(call: CallbackQuery):
     user = get_user(call.from_user.id)
@@ -945,139 +1179,42 @@ async def profile(call: CallbackQuery):
 @dp.callback_query(F.data == "about")
 async def about(call: CallbackQuery):
     await call.message.edit_text(
-        "ℹ️ **О проекте**\n\nIndyCard Exchange — карточная игра по IndyCar.\n\n@Scanialove\n@Gabriella1488",
+        "ℹ️ **IndyCard Exchange**\n\n"
+        "Карточная игра по мотивам IndyCar.\n\n"
+        "🎴 Собирай карты пилотов и легенд\n"
+        "🏦 Торгуй на бирже и рынке игроков\n"
+        "⚔️ Играй в PvP на кубиках\n"
+        "🎲 Проходи мини-игры\n\n"
+        "Разработчики:\n"
+        "@Scanialove\n"
+        "@Gabriella1488\n\n"
+        "❤️ Поддержать проект:\n"
+        "https://www.donationalerts.com/r/kimi_redrace",
         reply_markup=back_menu(),
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        disable_web_page_preview=True
     )
     await call.answer()
 
 @dp.callback_query(F.data == "promo_enter")
 async def promo_enter(call: CallbackQuery):
     await call.message.edit_text(
-        "🎁 **Активация промокода**\n\nВведи код в сообщении",
-        reply_markup=back_menu(),
-        parse_mode="Markdown"
-    )
-    await call.answer()
-
-# ===== ПРОМОКОД ЧЕРЕЗ СООБЩЕНИЕ =====
-@dp.message()
-async def handle_promo_message(message: Message):
-    user_id = message.from_user.id
-    text = message.text.strip()
-    
-    # Проверяем, не является ли это промокодом
-    if len(text) == 8 and text.isalnum():
-        result = use_promo(text.upper(), user_id)
-        await message.answer(f"🎁 **Результат**\n\n{result['message']}", parse_mode="Markdown")
-    else:
-        # Игнорируем всё остальное
-        pass
-
-# ===== МИНИ-ИГРЫ =====
-@dp.callback_query(F.data == "game_guess")
-async def game_guess(call: CallbackQuery):
-    attempts = get_game_attempts(call.from_user.id)
-    if attempts <= 0:
-        await call.answer("❌ Нет попыток! Купи в магазине.", show_alert=True)
-        return
-    use_game_attempt(call.from_user.id)
-    conn = sqlite3.connect("indycard.db")
-    c = conn.cursor()
-    c.execute("SELECT code, name, team FROM cards ORDER BY RANDOM() LIMIT 1")
-    card = c.fetchone()
-    conn.close()
-    if not card:
-        await call.answer("❌ Нет карт", show_alert=True)
-        return
-    code, name, team = card
-    conn = sqlite3.connect("indycard.db")
-    c = conn.cursor()
-    c.execute("SELECT name FROM cards WHERE name != ? ORDER BY RANDOM() LIMIT 3", (name,))
-    others = c.fetchall()
-    conn.close()
-    options = [name] + [o[0] for o in others]
-    random.shuffle(options)
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=options[0], callback_data=f"guess_{name}_{options[0]}"),
-         InlineKeyboardButton(text=options[1], callback_data=f"guess_{name}_{options[1]}")],
-        [InlineKeyboardButton(text=options[2], callback_data=f"guess_{name}_{options[2]}"),
-         InlineKeyboardButton(text=options[3], callback_data=f"guess_{name}_{options[3]}")],
-        [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_to_menu")]
-    ])
-    await call.message.edit_text(
-        f"🎲 **Угадай пилота**\n\nПодсказка: {team}\n\nКто это?",
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
-    await call.answer()
-
-@dp.callback_query(F.data.startswith("guess_"))
-async def guess_result(call: CallbackQuery):
-    parts = call.data.split("_")
-    correct, answer = parts[1], parts[2]
-    if correct == answer:
-        win = 50
-        update_balance(call.from_user.id, win, "game")
-        result = f"✅ +{win} 💰"
-    else:
-        result = f"❌ Это был {correct}"
-    user = get_user(call.from_user.id)
-    await call.message.edit_text(
-        f"🎲 **Результат**\n\n{result}\n\n💰 Баланс: {user[2]} 💰",
-        reply_markup=back_menu(),
-        parse_mode="Markdown"
-    )
-    await call.answer()
-
-@dp.callback_query(F.data == "game_dice")
-async def game_dice(call: CallbackQuery):
-    attempts = get_game_attempts(call.from_user.id)
-    if attempts <= 0:
-        await call.answer("❌ Нет попыток!", show_alert=True)
-        return
-    use_game_attempt(call.from_user.id)
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="10 💰", callback_data="dice_10"),
-         InlineKeyboardButton(text="25 💰", callback_data="dice_25")],
-        [InlineKeyboardButton(text="50 💰", callback_data="dice_50"),
-         InlineKeyboardButton(text="100 💰", callback_data="dice_100")],
-        [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_to_menu")]
-    ])
-    await call.message.edit_text(
-        "🎲 **Бросок кубиков**\n\nВыбери ставку (х2 при 6+, х3 при 11+):",
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
-    await call.answer()
-
-@dp.callback_query(F.data.startswith("dice_"))
-async def dice_result(call: CallbackQuery):
-    bet = int(call.data.split("_")[1])
-    user = get_user(call.from_user.id)
-    if user[2] < bet:
-        await call.answer("❌ Недостаточно!", show_alert=True)
-        return
-    d1, d2 = random.randint(1, 6), random.randint(1, 6)
-    total = d1 + d2
-    if total >= 11:
-        win = bet * 3
-    elif total >= 6:
-        win = bet * 2
-    else:
-        win = -bet
-    update_balance(call.from_user.id, win, "game")
-    user = get_user(call.from_user.id)
-    await call.message.edit_text(
-        f"🎲 **Результат**\n\n{d1} + {d2} = {total}\n"
-        f"{'🎉 Выигрыш: ' + str(win) if win > 0 else '❌ Проигрыш: ' + str(-win)}\n"
-        f"💰 Баланс: {user[2]} 💰",
+        "🎁 **Введите промокод**\n\n"
+        "Отправь код в сообщении (8 символов)",
         reply_markup=back_menu(),
         parse_mode="Markdown"
     )
     await call.answer()
 
 # ===== АДМИН =====
+@dp.callback_query(F.data == "admin_panel")
+async def admin_panel(call: CallbackQuery):
+    if not is_admin(call.from_user.id):
+        await call.answer("⛔ Нет доступа", show_alert=True)
+        return
+    await call.message.edit_text("👑 **Админ-панель**", reply_markup=admin_menu(), parse_mode="Markdown")
+    await call.answer()
+
 @dp.callback_query(F.data == "admin_list")
 async def admin_list(call: CallbackQuery):
     conn = sqlite3.connect("indycard.db")
@@ -1147,7 +1284,8 @@ async def admin_promo_coins(call: CallbackQuery):
     if not is_admin(call.from_user.id):
         return
     await call.message.edit_text(
-        "💵 Введите сумму монет для промокода в сообщении",
+        "💵 **Введите сумму монет**\n\n"
+        "Отправь число в сообщении",
         reply_markup=back_menu(),
         parse_mode="Markdown"
     )
@@ -1315,6 +1453,109 @@ async def price_change(call: CallbackQuery):
         reply_markup=markup,
         parse_mode="Markdown"
     )
+
+# ===== МИНИ-ИГРЫ =====
+@dp.callback_query(F.data == "game_guess")
+async def game_guess(call: CallbackQuery):
+    attempts = get_game_attempts(call.from_user.id)
+    if attempts <= 0:
+        await call.answer("❌ Нет попыток! Купи в магазине.", show_alert=True)
+        return
+    use_game_attempt(call.from_user.id)
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("SELECT code, name, team FROM cards ORDER BY RANDOM() LIMIT 1")
+    card = c.fetchone()
+    conn.close()
+    if not card:
+        await call.answer("❌ Нет карт", show_alert=True)
+        return
+    code, name, team = card
+    conn = sqlite3.connect("indycard.db")
+    c = conn.cursor()
+    c.execute("SELECT name FROM cards WHERE name != ? ORDER BY RANDOM() LIMIT 3", (name,))
+    others = c.fetchall()
+    conn.close()
+    options = [name] + [o[0] for o in others]
+    random.shuffle(options)
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=options[0], callback_data=f"guess_{name}_{options[0]}"),
+         InlineKeyboardButton(text=options[1], callback_data=f"guess_{name}_{options[1]}")],
+        [InlineKeyboardButton(text=options[2], callback_data=f"guess_{name}_{options[2]}"),
+         InlineKeyboardButton(text=options[3], callback_data=f"guess_{name}_{options[3]}")],
+        [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_to_menu")]
+    ])
+    await call.message.edit_text(
+        f"🎲 **Угадай пилота**\n\nПодсказка: {team}\n\nКто это?",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("guess_"))
+async def guess_result(call: CallbackQuery):
+    parts = call.data.split("_")
+    correct, answer = parts[1], parts[2]
+    if correct == answer:
+        win = 50
+        update_balance(call.from_user.id, win, "game")
+        result = f"✅ +{win} 💰"
+    else:
+        result = f"❌ Это был {correct}"
+    user = get_user(call.from_user.id)
+    await call.message.edit_text(
+        f"🎲 **Результат**\n\n{result}\n\n💰 Баланс: {user[2]} 💰",
+        reply_markup=back_menu(),
+        parse_mode="Markdown"
+    )
+    await call.answer()
+
+@dp.callback_query(F.data == "game_dice")
+async def game_dice(call: CallbackQuery):
+    attempts = get_game_attempts(call.from_user.id)
+    if attempts <= 0:
+        await call.answer("❌ Нет попыток!", show_alert=True)
+        return
+    use_game_attempt(call.from_user.id)
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="10 💰", callback_data="dice_10"),
+         InlineKeyboardButton(text="25 💰", callback_data="dice_25")],
+        [InlineKeyboardButton(text="50 💰", callback_data="dice_50"),
+         InlineKeyboardButton(text="100 💰", callback_data="dice_100")],
+        [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_to_menu")]
+    ])
+    await call.message.edit_text(
+        "🎲 **Бросок кубиков**\n\nВыбери ставку (х2 при 6+, х3 при 11+):",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("dice_"))
+async def dice_result(call: CallbackQuery):
+    bet = int(call.data.split("_")[1])
+    user = get_user(call.from_user.id)
+    if user[2] < bet:
+        await call.answer("❌ Недостаточно!", show_alert=True)
+        return
+    d1, d2 = random.randint(1, 6), random.randint(1, 6)
+    total = d1 + d2
+    if total >= 11:
+        win = bet * 3
+    elif total >= 6:
+        win = bet * 2
+    else:
+        win = -bet
+    update_balance(call.from_user.id, win, "game")
+    user = get_user(call.from_user.id)
+    await call.message.edit_text(
+        f"🎲 **Результат**\n\n{d1} + {d2} = {total}\n"
+        f"{'🎉 Выигрыш: ' + str(win) if win > 0 else '❌ Проигрыш: ' + str(-win)}\n"
+        f"💰 Баланс: {user[2]} 💰",
+        reply_markup=back_menu(),
+        parse_mode="Markdown"
+    )
+    await call.answer()
 
 # ===== ФОН =====
 async def update_prices():
